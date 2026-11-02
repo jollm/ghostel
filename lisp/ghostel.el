@@ -342,6 +342,19 @@ motion over an animated terminal).  Honor FORCE (deliberate paste/yank
 and mode-switch anchors) by returning nil when it is set."
   :type 'hook)
 
+(defcustom ghostel-debug-dump-file nil
+  "When non-nil, capture native terminal traffic for diagnostics.
+The value is a file name base: the terminal's byte stream is written to
+BASE.raw and a size timeline to BASE.log.  Timeline lines record spawn
+and resize events with the byte offset at which each occurred, so a
+capture can be replayed with the same sizes.  Both files are truncated
+when a terminal is created.  Captured output may contain anything the
+program displayed, including secrets; treat the files as sensitive.
+This is a debugging aid for platform-specific rendering (for example
+ConPTY on MS-Windows); leave it nil in normal use."
+  :type '(choice (const :tag "Off" nil) file)
+  :group 'ghostel)
+
 (defcustom ghostel-readonly-enter-hook nil
   "Hook run after entering copy or Emacs mode."
   :type 'hook)

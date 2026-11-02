@@ -509,6 +509,7 @@ const interned_symbols = [_][:0]const u8{
     "ghostel--update-directory",
     "ghostel-bold",
     "ghostel-comint--update-dir",
+    "ghostel-debug-dump-file",
     "ghostel-default",
     "ghostel-glyph-scale-floor",
     "ghostel-input",

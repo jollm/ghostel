@@ -38,6 +38,11 @@ renderer: Renderer,
 process: ?*NativeProcess = null,
 /// Last window size sent to the PTY.
 pty_size: WinSize = .{ .cols = 0, .rows = 0 },
+/// Optional diagnostic capture of the VT stream (`BASE.raw`) and a size
+/// timeline (`BASE.log`); enabled by `ghostel-debug-dump-file`.
+dump_raw: ?std.Io.File = null,
+dump_log: ?std.Io.File = null,
+dump_bytes: u64 = 0,
 /// Light/dark as classified by Emacs for `ghostel-default`; reported via CSI 996/997.
 color_scheme: gt.device_status.ColorScheme = .dark,
 
@@ -65,6 +70,8 @@ pub fn init(
     };
     errdefer term.terminal.deinit(alloc);
 
+    term.startDump(env);
+
     term.stream = .init(.{ .allocator = alloc, .handler = .init(alloc, term, term) });
     errdefer term.stream.deinit();
 
@@ -79,6 +86,50 @@ pub fn deinit(self: *Self) void {
     self.release();
 }
 
+/// Open the diagnostic dump files named by `ghostel-debug-dump-file`.
+/// Best-effort: a bad path or an unwritable directory disables the dump
+/// without failing terminal creation.
+fn startDump(self: *Self, env: emacs.Env) void {
+    const value = env.symbolValue("ghostel-debug-dump-file");
+    if (env.isNil(value)) return;
+
+    const path = env.extractStringAlloc(self.alloc, value, &self.string_buffer) catch return;
+    defer if (self.string_buffer) |buf| {
+        self.alloc.free(buf);
+        self.string_buffer = null;
+    };
+
+    const raw_path = std.fmt.allocPrint(self.alloc, "{s}.raw", .{path}) catch return;
+    defer self.alloc.free(raw_path);
+    const log_path = std.fmt.allocPrint(self.alloc, "{s}.log", .{path}) catch return;
+    defer self.alloc.free(log_path);
+
+    self.dump_raw = self.openDumpFile(raw_path) catch null;
+    self.dump_log = self.openDumpFile(log_path) catch null;
+    if (self.dump_raw == null and self.dump_log == null) return;
+    self.logDumpEvent("create", self.terminal.rows, self.terminal.cols);
+}
+
+fn openDumpFile(self: *Self, path: []const u8) !std.Io.File {
+    if (std.fs.path.isAbsolute(path))
+        return std.Io.Dir.createFileAbsolute(self.io, path, .{ .truncate = true });
+    return std.Io.Dir.cwd().createFile(self.io, path, .{ .truncate = true });
+}
+
+/// Append SIZE to the dump timeline.  Callers hold the terminal lock.
+fn logDumpEvent(self: *Self, comptime event: []const u8, rows: u16, cols: u16) void {
+    const file = self.dump_log orelse return;
+    var buf: [160]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "offset={d} event={s} rows={d} cols={d}\n", .{
+        self.dump_bytes, event, rows, cols,
+    }) catch return;
+    file.writeStreamingAll(self.io, line) catch |err| {
+        std.log.warn("ghostel: dump log write failed: {s}", .{@errorName(err)});
+        file.close(self.io);
+        self.dump_log = null;
+    };
+}
+
 pub fn retain(self: *Self) void {
     _ = self.refcount.fetchAdd(1, .monotonic);
 }
@@ -87,6 +138,8 @@ pub fn release(self: *Self) void {
     if (self.refcount.fetchSub(1, .acq_rel) != 1) return;
     std.debug.assert(self.process == null);
 
+    if (self.dump_raw) |file| file.close(self.io);
+    if (self.dump_log) |file| file.close(self.io);
     self.renderer.deinit();
     self.stream.deinit();
     self.terminal.deinit(self.alloc);
@@ -110,6 +163,7 @@ pub fn redraw(self: *Self, force_full: bool, force_sync: bool) !bool {
         if (!std.meta.eql(size, self.pty_size)) {
             try proc.resizePty(size);
             self.pty_size = size;
+            self.logDumpEvent("resize", self.terminal.rows, self.terminal.cols);
         }
     } else if (!std.meta.eql(pre_size, .{ self.terminal.cols, self.terminal.rows })) {
         // Emacs-owned PTYs carry no pixel geometry.
@@ -117,6 +171,7 @@ pub fn redraw(self: *Self, force_full: bool, force_sync: bool) !bool {
         if (env.isNotNil(process)) {
             _ = env.f("set-process-window-size", .{ process, self.terminal.rows, self.terminal.cols });
         }
+        self.logDumpEvent("resize", self.terminal.rows, self.terminal.cols);
     }
     return true;
 }
@@ -140,7 +195,20 @@ fn setColorPaletteLocked(self: *Self, palette: gt.color.Palette) !void {
 pub fn vtWrite(self: *Self, data: []const u8) !void {
     try self.lock();
     defer self.unlock();
+    self.dumpSlice(data);
     self.stream.nextSlice(data);
+}
+
+/// Append DATA to the diagnostic dump.  The caller must hold the lock.
+pub fn dumpSlice(self: *Self, data: []const u8) void {
+    const file = self.dump_raw orelse return;
+    file.writeStreamingAll(self.io, data) catch |err| {
+        std.log.warn("ghostel: dump write failed: {s}", .{@errorName(err)});
+        file.close(self.io);
+        self.dump_raw = null;
+        return;
+    };
+    self.dump_bytes += data.len;
 }
 
 pub fn ptyWrite(self: *Self, data: []const u8) !void {
@@ -314,7 +382,9 @@ pub fn spawnNativeProcess(
         // ConPTY keeps its own screen buffer without scrollback, so a resize
         // that pulled rows back would disagree with it about what is on screen.
         if (builtin.os.tag == .windows) self.terminal.flags.resize_pull_scrollback = false;
-        break :blk self.winSize();
+        const size = self.winSize();
+        self.logDumpEvent("spawn", size.rows, size.cols);
+        break :blk size;
     };
 
     const process = try self.alloc.create(NativeProcess);
