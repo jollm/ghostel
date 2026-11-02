@@ -42,6 +42,7 @@
 
 (defvar eshell-interpreter-alist)
 (defvar eshell-destroy-buffer-when-process-dies)
+(defvar eshell-mode-map)
 
 (declare-function eshell-find-interpreter "esh-ext"
                   (file args &optional no-examine-p))
@@ -50,6 +51,8 @@
 (declare-function eshell-gather-process-output "esh-proc" (command args))
 (declare-function eshell-interactive-output-p "esh-io"
                   (&optional index handles))
+(declare-function eshell-beginning-of-output "esh-mode" ())
+(declare-function eshell-end-of-output "esh-mode" ())
 
 (defvar eshell-current-subjob-p)
 (defvar eshell-last-input-end)
@@ -224,6 +227,29 @@ selected at that time; customize it to force a selection."
                  (string :tag "Or enter a custom string"))
   :group 'ghostel)
 
+(defvar ghostel--eshell-output-command nil
+  "Eshell's output-flush command, resolved from `eshell-mode-map'.
+It is `eshell-delete-output' on Emacs 30.1 and `eshell-kill-output' on
+older versions; resolving the key binding keeps the package's Emacs 28.1
+floor without a version check.")
+
+(defun ghostel--eshell-delete-output (orig &rest args)
+  "Clear kitty image debris before Eshell flushes output.
+ORIG is the original flush command and ARGS are its arguments.  Images
+are overlays or `display' slices on the rows about to be deleted;
+`delete-region' clamps overlays instead of removing them, which would
+leave fragments at the flush point."
+  (if (not (and (derived-mode-p 'eshell-mode)
+                (bound-and-true-p ghostel--kitty-active)
+                (fboundp 'eshell-beginning-of-output)
+                (not (ghostel--embedded-live-p ghostel--embedded-session))))
+      (apply orig args)
+    (let ((beg (eshell-beginning-of-output))
+          (end (eshell-end-of-output)))
+      (when (and beg end (< beg end))
+        (ghostel--kitty-remove-in-range beg end)))
+    (apply orig args)))
+
 ;;;###autoload
 (define-minor-mode ghostel-eshell-mode
   "Run interactive external commands in the Eshell buffer itself.
@@ -255,6 +281,11 @@ Add it to `eshell-load-hook'."
                 #'ghostel--eshell-visual-command-p)
     (advice-add 'eshell-gather-process-output :around
                 #'ghostel--eshell-gather-process-output)
+    (setq ghostel--eshell-output-command
+          (lookup-key eshell-mode-map (kbd "C-c C-o")))
+    (when (symbolp ghostel--eshell-output-command)
+      (advice-add ghostel--eshell-output-command :around
+                  #'ghostel--eshell-delete-output))
     (add-hook 'eshell-mode-hook #'ghostel--eshell-local-mode)
     (dolist (buffer (buffer-list))
       (with-current-buffer buffer
@@ -265,6 +296,10 @@ Add it to `eshell-load-hook'."
                    #'ghostel--eshell-visual-command-p)
     (advice-remove 'eshell-gather-process-output
                    #'ghostel--eshell-gather-process-output)
+    (when ghostel--eshell-output-command
+      (advice-remove ghostel--eshell-output-command
+                     #'ghostel--eshell-delete-output)
+      (setq ghostel--eshell-output-command nil))
     (remove-hook 'eshell-mode-hook #'ghostel--eshell-local-mode)
     (dolist (buffer (buffer-list))
       (with-current-buffer buffer
