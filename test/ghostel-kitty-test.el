@@ -7,6 +7,7 @@
 ;;; Code:
 
 (require 'ghostel-test-helpers)
+(require 'ghostel-embedded)
 (require 'cl-lib)
 
 (defun ghostel-test--kitty-fixture (body)
@@ -670,6 +671,178 @@ The placement id comes from the underline colour."
   (should-not (ghostel-test--kitty-virtual-calls
                (concat "\e[38;5;1m" (string #x10EEEE #x0305 #x0305) "\e[39m")
                nil nil (list (make-string 8 ?\n) ""))))
+
+;;; Embedded regions
+
+(defmacro ghostel-test--kitty-with-region (&rest body)
+  "Run BODY in a buffer with host text above a marker-delimited screen.
+BODY can use START and END, markers delimiting the region; the screen
+bounds hook returns them, as an embedded terminal installs it."
+  (declare (indent 0) (debug t))
+  `(with-temp-buffer
+     (insert "prompt$ history\n")
+     (let* ((start (copy-marker (point) nil))
+            (end (copy-marker (point) t))
+            (ghostel--kitty-screen-bounds-function
+             (lambda ()
+               (cons (marker-position start) (marker-position end)))))
+       (insert "row0 text\nrow1 text\n")
+       ,@body)))
+
+(ert-deftest ghostel-test-kitty-pinned-image-uses-region-rows ()
+  "A pinned placement's rows are counted from the embedded region."
+  (ghostel-test--kitty-fixture
+   (lambda ()
+     (ghostel-test--kitty-with-region
+      (let ((row0 start)
+            (row1 (save-excursion (goto-char start) (forward-line 1) (point))))
+        (ghostel--kitty-display-image "P6" 1 0 2 1 16 16)
+        (should-not (get-text-property row0 'display))
+        (should (get-text-property row1 'display))
+        ;; Host text above the region is never decorated.
+        (should-not (get-text-property (point-min) 'display)))))))
+
+(ert-deftest ghostel-test-kitty-clear-scoped-to-region ()
+  "Clearing images leaves the host text above the region alone."
+  (ghostel-test--kitty-fixture
+   (lambda ()
+     (ghostel-test--kitty-with-region
+      (ghostel--kitty-display-image "P6" 0 0 2 1 16 16)
+      (should (get-text-property start 'ghostel-kitty))
+      (ghostel--kitty-clear)
+      (should-not (get-text-property start 'display))
+      (should-not (get-text-property (point-min) 'ghostel-kitty))))))
+
+(ert-deftest ghostel-test-kitty-virtual-image-anchors-at-region-end ()
+  "Virtual placeholder runs are counted up from the region's last row."
+  (ghostel-test--kitty-fixture
+   (lambda ()
+     (ghostel-test--kitty-with-region
+      (goto-char end)
+      (insert (string #x10EEEE) (string #x10EEEE) "\n")
+      (let ((row (save-excursion (goto-char end) (forward-line -1) (point))))
+        (ghostel--kitty-display-virtual "P6" 0 0 0 0 1 1 1)
+        (should (get-text-property row 'ghostel-kitty)))))))
+
+(ert-deftest ghostel-test-kitty-embedded-storage-limit ()
+  "An embedded terminal enables images only on a graphical frame."
+  (cl-letf (((symbol-function 'ghostel--load-module) #'ignore)
+            ((symbol-function 'ghostel--set-region) #'ignore)
+            ((symbol-function 'ghostel--set-size-with-cell-dims) #'ignore)
+            ((symbol-function 'ghostel--apply-palette) #'ignore)
+            ((symbol-function 'ghostel--apply-bold-config) #'ignore))
+    (let ((limit nil) (mediums nil))
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda () t))
+                ((symbol-function 'ghostel--new)
+                 (lambda (_rows _cols _scrollback l m)
+                   (setq limit l mediums m) 'fake-term)))
+        (with-temp-buffer
+          (insert "prompt\n")
+          (ghostel--embedded-start (current-buffer) (point) 24 80)
+          (should (eql limit ghostel-kitty-graphics-storage-limit))
+          (should (integerp mediums))
+          ;; The bounds hook follows the region markers.
+          (should (equal (ghostel--kitty-screen-bounds)
+                         (cons (point) (point)))))))
+    (let ((limit nil))
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda () nil))
+                ((symbol-function 'ghostel--new)
+                 (lambda (_rows _cols _scrollback l _mediums)
+                   (setq limit l) 'fake-term)))
+        (with-temp-buffer
+          (ghostel--embedded-start (current-buffer) (point) 24 80)
+          (should (eql limit 0)))))))
+
+(ert-deftest ghostel-test-kitty-trim-keeps-image-rows ()
+  "Trailing trim keeps blank rows that carry kitty image slices."
+  (with-temp-buffer
+    (insert "text\n")
+    (let* ((start (copy-marker (point) nil))
+           (end (copy-marker (point) t))
+           (session (ghostel-embedded--make
+                     :buffer (current-buffer)
+                     :start start
+                     :end end)))
+      (insert "   \n   \n")
+      ;; The first blank row carries an image slice; the second is empty.
+      (add-text-properties (marker-position start)
+                           (+ 3 (marker-position start))
+                           '(ghostel-kitty t display (slice 0 0 8 16)))
+      (ghostel--embedded-trim-trailing-blank-lines session)
+      (should (equal (buffer-string) "text\n   \n")))))
+
+(ert-deftest ghostel-test-kitty-trim-keeps-image-overlays ()
+  "Trailing trim keeps rows whose image uses the empty-line overlay path."
+  (with-temp-buffer
+    (insert "text\n")
+    (let* ((start (copy-marker (point) nil))
+           (end (copy-marker (point) t))
+           (session (ghostel-embedded--make
+                     :buffer (current-buffer)
+                     :start start
+                     :end end)))
+      (insert "\n\n")
+      (let ((overlay (make-overlay (marker-position start)
+                                   (marker-position start))))
+        (overlay-put overlay 'ghostel-kitty t))
+      (ghostel--embedded-trim-trailing-blank-lines session)
+      (should (equal (buffer-string) "text\n\n")))))
+
+(ert-deftest ghostel-test-kitty-remove-in-range ()
+  "Only kitty-tagged slices and overlays in a range are removed."
+  (with-temp-buffer
+    (insert "aaaa bbbb\n")
+    (setq ghostel--kitty-active t)
+    (add-text-properties 1 5 '(ghostel-kitty t display (slice 0 0 8 16)))
+    (add-text-properties 6 10 '(display (raise 1)))
+    (let ((overlay (make-overlay 2 2)))
+      (overlay-put overlay 'ghostel-kitty t))
+    (ghostel--kitty-remove-in-range 1 11)
+    (should-not (get-text-property 1 'ghostel-kitty))
+    (should-not (get-text-property 1 'display))
+    (should (equal (get-text-property 6 'display) '(raise 1)))
+    (should-not (overlays-in 1 11))
+    (should-not ghostel--kitty-active)))
+
+(ert-deftest ghostel-test-kitty-overlay-replaces-not-stacks ()
+  "Re-emitting an image on an empty row keeps one overlay, not a pile."
+  (ghostel-test--kitty-fixture
+   (lambda ()
+     (with-temp-buffer
+       (insert "host\n")
+       (let ((start (copy-marker (point) nil))
+             (end (copy-marker (point) t)))
+         (insert "\n\n")
+         (let ((ghostel--kitty-screen-bounds-function
+                (lambda () (cons (marker-position start)
+                                 (marker-position end)))))
+           (ghostel--kitty-display-image "P6" 0 0 2 1 16 16)
+           (ghostel--kitty-display-image "P6" 0 0 2 1 16 16)
+           (should (= (length (overlays-in start (1+ start))) 1))))))))
+
+(ert-deftest ghostel-test-kitty-short-rows-pad-to-image-column ()
+  "Rows shorter than the image's column are padded out to it."
+  (ghostel-test--kitty-fixture
+   (lambda ()
+     (with-temp-buffer
+       (insert "host\n")
+       (let ((start (copy-marker (point) nil))
+             (end (copy-marker (point) t)))
+         ;; Row 0 has nine spaces (a cursor-padded row); row 1 is empty.
+         (insert "         \n\n")
+         (let ((ghostel--kitty-screen-bounds-function
+                (lambda () (cons (marker-position start)
+                                 (marker-position end)))))
+           (ghostel--kitty-display-image "P6" 0 9 2 2 16 16)
+           (let* ((beg (marker-position start))
+                  (row0 (car (overlays-in (+ beg 9) (+ beg 10))))
+                  (row1 (car (overlays-in (+ beg 10) (+ beg 12)))))
+             (should row0)
+             (should row1)
+             ;; Row 0's line already reaches column 9: no padding.
+             (should (= (length (overlay-get row0 'before-string)) 1))
+             ;; Row 1 is empty: nine spaces pad it to column 9.
+             (should (= (length (overlay-get row1 'before-string)) 10)))))))))
 
 (provide 'ghostel-kitty-test)
 ;;; ghostel-kitty-test.el ends here
