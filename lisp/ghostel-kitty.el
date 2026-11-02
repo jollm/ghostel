@@ -121,10 +121,26 @@ the buffer line is long enough to hold the placement's column range."
          (spec (list slice img)))
     (cond
      ;; Range is empty (line shorter than vp-col) — use an overlay so we
-     ;; don't eat the newline.
+     ;; don't eat the newline.  Replace an existing kitty overlay at the
+     ;; same cell: a terminal stacks placements at a cell and the newest
+     ;; wins, but Emacs would render every `before-string' at once (a
+     ;; pile of images) if each re-emission added another overlay.
      ((<= end start)
-      (let ((ov (make-overlay start start)))
-        (overlay-put ov 'before-string (propertize " " 'display spec))
+      (dolist (old (overlays-in (max (point-min) (1- start))
+                                (min (point-max) (1+ start))))
+        (when (and (overlay-get old 'ghostel-kitty)
+                   (= (overlay-start old) start)
+                   (= (overlay-end old) start))
+          (delete-overlay old)))
+      ;; The line ends before the image's column: pad with spaces so the
+      ;; image starts at that column on every row.  Clamping to the line
+      ;; end would draw short rows at the line's end and longer rows at
+      ;; the placement's column, making the image ragged.
+      (let* ((missing (max 0 (- (+ line-pos vp-col-clamped) line-end-pos)))
+             (ov (make-overlay start start)))
+        (overlay-put ov 'before-string
+                     (concat (make-string missing ?\s)
+                             (propertize " " 'display spec)))
         (overlay-put ov 'ghostel-kitty t)))
      ;; Line has enough text — use text property.
      (t
