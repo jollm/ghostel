@@ -864,5 +864,76 @@ bounds hook returns them, as an embedded terminal installs it."
              ;; Row 1 is empty: nine spaces pad it to column 9.
              (should (= (length (overlay-get row1 'before-string)) 10)))))))))
 
+(ert-deftest ghostel-test-kitty-dedups-placements-at-one-cell ()
+  "Two placements at one cell emit only the newest image.
+Programs that animate redraw a cell every frame, leaving one placement
+per frame in libghostty; only the newest should reach Elisp."
+  :tags '(native)
+  (let ((buf (generate-new-buffer " *ghostel-test-kitty-dedup*"))
+        (calls nil))
+    (unwind-protect
+        (with-current-buffer buf
+          (let ((term (ghostel--new 5 40 1000)))
+            (ghostel--set-size term 5 40 1 1)
+            (cl-letf (((symbol-function 'ghostel--kitty-display-image)
+                       (lambda (&rest args) (push args calls)))
+                      ((symbol-function 'display-graphic-p) (lambda () t)))
+              (ghostel--write-vt
+               term (concat "\e_Ga=T,f=24,s=1,v=1,C=1;/wAA\e\\"
+                            "\e_Ga=T,f=24,s=1,v=1,C=1;AP8A\e\\"))
+              (ghostel--redraw term t))
+            (should (= (length calls) 1))
+            (let ((args (car calls)))
+              ;; Green: the second, newest image, in a 1x1 cell.
+              (should (equal (nth 0 args) "P6\n1 1\n255\n\0\377\0"))
+              (should (= (nth 3 args) 1))
+              (should (= (nth 4 args) 1)))))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-kitty-keeps-placements-at-different-cells ()
+  "Placements with different footprints are all emitted."
+  :tags '(native)
+  (let ((buf (generate-new-buffer " *ghostel-test-kitty-cells*"))
+        (calls nil))
+    (unwind-protect
+        (with-current-buffer buf
+          (let ((term (ghostel--new 5 40 1000)))
+            (ghostel--set-size term 5 40 1 1)
+            (cl-letf (((symbol-function 'ghostel--kitty-display-image)
+                       (lambda (&rest args) (push args calls)))
+                      ((symbol-function 'display-graphic-p) (lambda () t)))
+              (ghostel--write-vt
+               term (concat "\e_Ga=T,f=24,s=1,v=1,C=1;/wAA\e\\"
+                            "\e[2;1H"
+                            "\e_Ga=T,f=24,s=1,v=1,C=1;AP8A\e\\"))
+              (ghostel--redraw term t))
+            (should (= (length calls) 2))
+            (should (equal (sort (mapcar (lambda (call) (nth 1 call)) calls)
+                                 #'<)
+                           '(0 1)))))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-kitty-keeps-different-sizes-at-one-cell ()
+  "Only equal footprints are coalesced."
+  :tags '(native)
+  (let ((buf (generate-new-buffer " *ghostel-test-kitty-sizes*"))
+        (calls nil))
+    (unwind-protect
+        (with-current-buffer buf
+          (let ((term (ghostel--new 5 40 1000)))
+            (ghostel--set-size term 5 40 1 1)
+            (cl-letf (((symbol-function 'ghostel--kitty-display-image)
+                       (lambda (&rest args) (push args calls)))
+                      ((symbol-function 'display-graphic-p) (lambda () t)))
+              (ghostel--write-vt
+               term (concat "\e_Ga=T,f=24,s=1,v=1,C=1;/wAA\e\\"
+                            "\e_Ga=T,f=24,s=2,v=2,C=1;/wAA/wAA/wAA/wAA\e\\"))
+              (ghostel--redraw term t))
+            (should (= (length calls) 2))
+            (should (equal (sort (mapcar (lambda (call) (nth 3 call)) calls)
+                                 #'<)
+                           '(1 2)))))
+      (kill-buffer buf))))
+
 (provide 'ghostel-kitty-test)
 ;;; ghostel-kitty-test.el ends here

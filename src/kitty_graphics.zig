@@ -12,19 +12,60 @@ const ppm = @import("ppm.zig");
 
 /// Query all visible kitty graphics placements from libghostty and
 /// emit them to Elisp during redraw.
+///
+/// Programs that animate redraw a cell every frame.  Each frame is a
+/// fresh image with an implicit placement id, so libghostty accumulates
+/// one placement per frame at the same cell.  Emitting every one of them
+/// costs time linear in playback length, and zero-width rows pile up a
+/// stack of overlays.  Keep only the newest internal placement per screen
+/// footprint for this redraw; explicit placement ids are updated in place
+/// and therefore never duplicate, and virtual placements are drawn from
+/// their placeholder runs.
 pub fn emitPlacements(env: emacs.Env, term: *GhostelTerm) !void {
     const storage = &term.terminal.screens.active.kitty_images;
+    const pages = &term.terminal.screens.active.pages;
+    var newest: std.AutoHashMapUnmanaged(CellKey, DedupedPlacement) = .empty;
+    defer newest.deinit(term.alloc);
+
     var iterator = storage.placements.iterator();
-    // Iterate over all placements. Per-placement errors skip that placement only.
     while (iterator.next()) |entry| {
-        emitOnePlacement(
-            env,
-            term,
-            storage,
-            entry.key_ptr,
-            entry.value_ptr,
-        ) catch continue;
+        const key = entry.key_ptr.*;
+        const placement = entry.value_ptr;
+        const image = storage.images.getPtr(key.image_id) orelse continue;
+        const anchor = resolveAnchor(storage, placement) orelse continue;
+        if (key.placement_id.tag != .internal) {
+            emitPinned(env, term, image, placement, anchor.pin, anchor.h_off, anchor.v_off) catch continue;
+            continue;
+        }
+        // A pruned anchor page leaves the pin parked at (0,0).
+        if (anchor.pin.garbage) continue;
+        const pin_screen = pages.pointFromPin(.screen, anchor.pin.*) orelse continue;
+        const grid = placement.gridSize(image.*, &term.terminal);
+        const cell = CellKey{
+            .row = @as(i64, @intCast(pin_screen.screen.y)) + anchor.v_off,
+            .col = @as(i64, @intCast(pin_screen.screen.x)) + anchor.h_off,
+            .rows = grid.rows,
+            .cols = grid.cols,
+        };
+        const gop = try newest.getOrPut(term.alloc, cell);
+        if (!gop.found_existing or key.placement_id.id > gop.value_ptr.placement_id) {
+            gop.value_ptr.* = .{
+                .image_id = key.image_id,
+                .placement = placement,
+                .pin = anchor.pin,
+                .h_off = anchor.h_off,
+                .v_off = anchor.v_off,
+                .placement_id = key.placement_id.id,
+            };
+        }
     }
+
+    var remaining = newest.valueIterator();
+    while (remaining.next()) |entry| {
+        const image = storage.images.getPtr(entry.image_id) orelse continue;
+        emitPinned(env, term, image, entry.placement, entry.pin, entry.h_off, entry.v_off) catch continue;
+    }
+
     emitVirtualRuns(env, term, storage);
 }
 
@@ -163,38 +204,54 @@ fn cellsFor(px: u32, total_px: u32, count: usize) !u32 {
     return (px + cell - 1) / cell;
 }
 
-fn emitOnePlacement(
-    env: emacs.Env,
-    term: *GhostelTerm,
-    storage: *const gt.kitty.graphics.ImageStorage,
-    key: *const gt.kitty.graphics.ImageStorage.PlacementKey,
+/// Anchor of a pinned placement: the screen pin plus any relative offsets.
+const Anchor = struct {
+    pin: *const gt.PageList.Pin,
+    h_off: i32,
+    v_off: i32,
+};
+
+/// Screen cell and footprint identifying where a placement lands.
+const CellKey = struct {
+    row: i64,
+    col: i64,
+    rows: u32,
+    cols: u32,
+};
+
+/// Newest placement kept for one screen footprint.
+const DedupedPlacement = struct {
+    image_id: u32,
     placement: *const gt.kitty.graphics.ImageStorage.Placement,
-) !void {
-    const image = storage.images.getPtr(key.image_id) orelse return error.ImageNotFound;
-    switch (placement.location) {
-        // Drawn from its placeholder runs by emitVirtualRuns.
-        .virtual => return,
-        .pin => |pin| try emitPinned(env, term, image, placement, pin, 0, 0),
-        .relative => |rel| {
-            // An unresolvable chain is never drawn.
-            const chain = storage.resolveChain(rel) orelse return error.NotVisible;
-            switch (chain.root.location) {
-                .pin => |root_pin| try emitPinned(
-                    env,
-                    term,
-                    image,
-                    placement,
-                    root_pin,
-                    chain.horizontal_offset,
-                    chain.vertical_offset,
-                ),
-                // Not implemented: kitty anchors these at the top-left
-                // placeholder cell of the parent's runs.
-                .virtual => return error.NotVisible,
-                .relative => unreachable,
-            }
+    pin: *const gt.PageList.Pin,
+    h_off: i32,
+    v_off: i32,
+    placement_id: u32,
+};
+
+/// Resolve PLACEMENT to the pin and offsets it draws from.  Virtual
+/// placements are drawn from their placeholder runs and have no single
+/// anchor; virtual roots under relative placements are not implemented.
+fn resolveAnchor(
+    storage: *const gt.kitty.graphics.ImageStorage,
+    placement: *const gt.kitty.graphics.ImageStorage.Placement,
+) ?Anchor {
+    return switch (placement.location) {
+        .virtual => null,
+        .pin => |pin| .{ .pin = pin, .h_off = 0, .v_off = 0 },
+        .relative => |rel| blk: {
+            const chain = storage.resolveChain(rel) orelse break :blk null;
+            const pin = switch (chain.root.location) {
+                .pin => |root_pin| root_pin,
+                .virtual, .relative => break :blk null,
+            };
+            break :blk .{
+                .pin = pin,
+                .h_off = chain.horizontal_offset,
+                .v_off = chain.vertical_offset,
+            };
         },
-    }
+    };
 }
 
 /// Emit a placement anchored at PIN, offset by H_OFF/V_OFF cells.
