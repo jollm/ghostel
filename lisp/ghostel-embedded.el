@@ -30,6 +30,7 @@
 (declare-function ghostel--encode-paste "ghostel-module" (term data))
 (declare-function ghostel--mouse-event "ghostel-module")
 (declare-function ghostel--mouse-tracking-p "ghostel-module")
+(declare-function ghostel--mouse-motion-p "ghostel-module")
 (declare-function ghostel--new "ghostel-module")
 (declare-function ghostel--redraw "ghostel-module"
                   (term &optional full force-sync))
@@ -291,6 +292,42 @@ the window's screen lines and a full-window program's view drifts.")
           (kill-local-variable variable))))
     (setf (ghostel-embedded-host-settings session) nil)))
 
+(defvar-local ghostel--embedded-mouse-hover-last-cell nil
+  "Last cell forwarded as a hover motion event for the embedded terminal.")
+
+(defun ghostel-embedded-mouse-motion (event)
+  "Forward a hover `mouse-movement' EVENT to the embedded terminal.
+Only when it asked for any-event motion (DEC 1003) and the pointer moved
+to a new cell."
+  (interactive "e")
+  (let ((session ghostel--embedded-session)
+        (posn (event-start event)))
+    (when (and (ghostel--embedded-live-p session)
+               (ignore-errors
+                 (ghostel--mouse-motion-p (ghostel-embedded-term session)))
+               (eq (posn-window posn) (selected-window)))
+      (let ((cell (ghostel--embedded-mouse-cell posn)))
+        (when (and cell
+                   (not (equal cell
+                               ghostel--embedded-mouse-hover-last-cell)))
+          (setq ghostel--embedded-mouse-hover-last-cell cell)
+          (ghostel--embedded-send-mouse session
+                                        2  ; motion
+                                        0  ; no button
+                                        (cdr cell) (car cell)
+                                        (ghostel--mouse-mods event)))))))
+
+(defun ghostel--embedded-sync-hover-motion (session)
+  "Enable Emacs motion events while SESSION wants any-event motion.
+The variable `track-mouse' is global, so only the selected window's
+terminal drives it."
+  (when (eq (window-buffer (selected-window)) (current-buffer))
+    (setq track-mouse
+          (and (ghostel--embedded-live-p session)
+               (ignore-errors
+                 (ghostel--mouse-motion-p (ghostel-embedded-term session)))
+               t))))
+
 (defun ghostel--embedded-start (buffer &optional position rows cols)
   "Start an embedded terminal in BUFFER.
 POSITION is where the region starts; it defaults to `point-max' and must
@@ -473,6 +510,7 @@ keeps a retry scheduled when the renderer declined."
           (ghostel--embedded-update-cursor session))
         (unless rendered
           (ghostel--embedded-schedule-redraw session))
+        (ghostel--embedded-sync-hover-motion session)
         rendered))))
 
 (defun ghostel--embedded-resize (session rows cols &optional force)
@@ -693,6 +731,11 @@ returns to semi-char mode.")
   "<wheel-down>"   #'ghostel-embedded-mouse-wheel
   "<mouse-4>"      #'ghostel-embedded-mouse-wheel
   "<mouse-5>"      #'ghostel-embedded-mouse-wheel)
+
+(define-keymap :keymap ghostel-embedded-semi-char-map
+  "<mouse-movement>" #'ghostel-embedded-mouse-motion)
+(define-keymap :keymap ghostel-embedded-char-map
+  "<mouse-movement>" #'ghostel-embedded-mouse-motion)
 
 (defvar-local ghostel--embedded-semi-char-active nil
   "Non-nil while this buffer's embedded terminal is in semi-char mode.

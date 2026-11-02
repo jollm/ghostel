@@ -268,7 +268,13 @@ pub fn encodeMouse(
 
     const event = gt.input.MouseEncodeEvent{
         .action = @fromBackingInt(@intCast(action)),
-        .button = @fromBackingInt(@intCast(button)),
+        // The Lisp side passes 0 for "no button".  Hover motion needs a
+        // null button so the encoder emits a button-less motion event;
+        // Button.unknown would be dropped as unencodable.
+        .button = if (button == 0 and action == 2)
+            null
+        else
+            @fromBackingInt(@intCast(button)),
         .mods = @bitCast(@as(i16, @truncate(mods_val))),
         .pos = .{ .x = @floatFromInt(col), .y = @floatFromInt(row) },
     };
@@ -276,7 +282,11 @@ pub fn encodeMouse(
     // Encode
     var buf: [128]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);
-    try gt.input.encodeMouse(&writer, event, options);
+    var mouse_options = options;
+    // A held button lets motion outside the viewport be reported; hover
+    // motion has no button and is always inside it.
+    mouse_options.any_button_pressed = button != 0;
+    try gt.input.encodeMouse(&writer, event, mouse_options);
     const encoded = writer.buffered();
 
     if (encoded.len == 0) return false;
@@ -937,6 +947,24 @@ pub const emacs_functions = [_]emacs.FunctionEntry{
                     .none, .x10 => env.nil(),
                     else => env.t(),
                 };
+            }
+        },
+    },
+    .{
+        .name = "ghostel--mouse-motion-p",
+        .arity = .{ 1, 1 },
+        .doc =
+        \\Return t if the terminal reports all mouse motion (DEC 1003).
+        \\
+        \\(ghostel--mouse-motion-p TERM)
+        ,
+        .impl = struct {
+            pub fn call(env: emacs.Env, _: isize, args: [*c]emacs.Value) !emacs.Value {
+                if (env.isNil(args[0])) return env.nil();
+                const term = env.getUserPtr(Self, args[0]) orelse return error.InvalidTerminalHandle;
+                try term.lock();
+                defer term.unlock();
+                return if (term.terminal.flags.mouse_event == .any) env.t() else env.nil();
             }
         },
     },

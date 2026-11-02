@@ -804,6 +804,7 @@ to nil to disable the regex fallback entirely (OSC 133 only)."
 (declare-function ghostel--module-version "ghostel-module")
 (declare-function ghostel--mouse-event "ghostel-module")
 (declare-function ghostel--mouse-tracking-p "ghostel-module")
+(declare-function ghostel--mouse-motion-p "ghostel-module")
 (declare-function ghostel--new "ghostel-module")
 (declare-function ghostel--redraw "ghostel-module"
                   (term &optional full force-sync))
@@ -1298,6 +1299,7 @@ Input modes (`ghostel-semi-char-mode-map', `ghostel-char-mode-map',
   "<mouse-3>"        #'ghostel--mouse-release
   "<drag-mouse-2>"   #'ghostel--mouse-drag
   "<drag-mouse-3>"   #'ghostel--mouse-drag
+  "<mouse-movement>" #'ghostel--mouse-hover-motion
   ;; Drag and drop
   "<drag-n-drop>"    #'ghostel--drop)
 
@@ -1375,6 +1377,7 @@ back to semi-char mode.")
   "<drag-mouse-1>"   #'ghostel--mouse-drag
   "<drag-mouse-2>"   #'ghostel--mouse-drag
   "<drag-mouse-3>"   #'ghostel--mouse-drag
+  "<mouse-movement>" #'ghostel--mouse-hover-motion
   ;; Drag and drop (no parent to fall back on)
   "<drag-n-drop>"    #'ghostel--drop
   ;; Sole escape hatch: exit char mode.  Graphical Emacs sends
@@ -1755,7 +1758,8 @@ Returns the sequence string, or nil for unknown keys."
              ;; Embedded terminals do not anchor ghostel-style windows:
              ;; the host buffer owns the display around the region.
              (not (bound-and-true-p ghostel--embedded-session)))
-    (ghostel--anchor-window nil t)))
+    (ghostel--anchor-window nil t))
+  (ghostel--sync-hover-motion))
 
 (defun ghostel--self-insert ()
   "Send the last typed character to the terminal."
@@ -2348,6 +2352,43 @@ within the same cell so the PTY is not flooded with redundant motion."
                               ghostel--mouse-drag-button
                               row col
                               (ghostel--mouse-mods event))))))
+
+(defvar-local ghostel--mouse-hover-last-cell nil
+  "Last cell forwarded as a hover motion event, as (ROW . COL).")
+
+(defun ghostel--mouse-hover-motion (event)
+  "Forward a hover `mouse-movement' EVENT to the terminal.
+Only when the program asked for any-event motion (DEC 1003), no button
+is held, and the pointer moved to a new cell."
+  (interactive "e")
+  (when (and ghostel--term
+             (not ghostel--mouse-drag-button)
+             (ghostel--terminal-input-mode-p)
+             (ignore-errors (ghostel--mouse-motion-p ghostel--term))
+             (eq (posn-window (event-start event)) (selected-window)))
+    (let* ((posn (event-start event))
+           (col-row (ghostel--posn-cell posn))
+           (cell (cons (cdr col-row) (car col-row))))
+      (unless (equal cell ghostel--mouse-hover-last-cell)
+        (setq ghostel--mouse-hover-last-cell cell)
+        (ghostel--mouse-event ghostel--term
+                              2  ; motion
+                              0  ; no button
+                              (cdr col-row) (car col-row)
+                              (ghostel--mouse-mods event))))))
+
+(defun ghostel--sync-hover-motion ()
+  "Enable Emacs motion events while the terminal wants any-event motion.
+The variable `track-mouse' is global, so only the selected window's
+terminal drives it.  The drag path saves and restores the value around
+a drag."
+  (when (eq (window-buffer (selected-window)) (current-buffer))
+    (setq track-mouse
+          (and ghostel--term
+               (ghostel--terminal-input-mode-p)
+               ;; A stale or fake handle (tests) means no tracking.
+               (ignore-errors (ghostel--mouse-motion-p ghostel--term))
+               t))))
 
 (defun ghostel--mouse-release (event)
   "Handle mouse button release EVENT for terminal mouse tracking.
@@ -4926,7 +4967,8 @@ them during synchronized output or when BUFFER has no render window."
             ;; Outside the render `let*' so user code runs without the
             ;; render inhibits.
             (when (and rendered ghostel-foreground-change-functions)
-              (ghostel--notify-foreground-change))))))))
+              (ghostel--notify-foreground-change))
+            (ghostel--sync-hover-motion)))))))
 
 (defun ghostel-force-redraw ()
   "Force an immediate terminal redraw, bypassing synchronized-output batching.
