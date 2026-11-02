@@ -103,6 +103,7 @@ Eshell buffer, with the final screen frozen into normal buffer text.  This
 supersedes `ghostel-eshell-visual-command-mode` while enabled.  On
 MS-Windows (and with `ghostel-eshell-use-native-pty` set to `t`) the terminal
 uses ghostel's native ConPTY/PTY instead of Emacs's, so no `stty` is needed.
+Kitty graphics images are shown on graphical frames.
 ```emacs-lisp
 (use-package ghostel-eshell
   :hook (eshell-load . ghostel-eshell-mode))

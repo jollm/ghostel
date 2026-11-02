@@ -11,6 +11,12 @@ All notable changes to this project will be documented in this file.
   chooses `auto` (native on MS-Windows), `t` (always native in local
   buffers) or `nil` (always Emacs's PTY); remote buffers stay on Emacs's
   PTY so TRAMP can run the command.
+- In-buffer Eshell terminals support kitty graphics on graphical frames:
+  placements are anchored to the terminal region, so images from `chafa`,
+  `ranger` and similar programs render in place and remain in the frozen
+  output after the command exits; flushing the output (`C-c C-o`) discards
+  them with the rows.  A TTY frame keeps the protocol disabled so programs
+  fall back to text.
 
 ## [0.60.0] — 2026-10-29
 
