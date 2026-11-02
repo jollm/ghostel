@@ -266,9 +266,14 @@ already has a live embedded session or is dead."
            (end (copy-marker position t))
            (rows (max 1 (or rows 24)))
            (cols (max 1 (or cols 80)))
-           ;; No kitty graphics: an embedded region has no stable image
-           ;; anchors and the host buffer may already have overlays.
-           (term (ghostel--new rows cols ghostel-max-scrollback 0)))
+           ;; Images need a graphical frame; on a TTY the protocol stays
+           ;; disabled so programs' support probes fall back to text.
+           (term (ghostel--new
+                  rows cols ghostel-max-scrollback
+                  (if (display-graphic-p)
+                      ghostel-kitty-graphics-storage-limit
+                    0)
+                  (ghostel--kitty-mediums-bits))))
       (ghostel--set-region term start end)
       (ghostel--set-size-with-cell-dims term rows cols)
       (ghostel--apply-palette term)
@@ -281,6 +286,13 @@ already has a live embedded session or is dead."
                       :rows rows
                       :cols cols)))
         (setq ghostel--embedded-session session)
+        ;; Kitty placements and cleanup stay inside the region rather
+        ;; than addressing the host buffer around it.
+        (setq ghostel--kitty-screen-bounds-function
+              (lambda ()
+                (let ((beg (marker-position (ghostel-embedded-start session)))
+                      (end (marker-position (ghostel-embedded-end session))))
+                  (and beg end (cons beg end)))))
         session))))
 
 (defun ghostel--embedded-feed (session output)
@@ -768,6 +780,10 @@ Returns SESSION."
           (error nil))
         (ghostel--embedded-clear-cursor)
         (ghostel--embedded-remove-region-props session)
+        ;; Keep kitty image slices (both text properties and overlays) in
+        ;; the frozen output; trimming preserves image rows.  The bounds
+        ;; hook must not outlive the session.
+        (setq ghostel--kitty-screen-bounds-function nil)
         (ghostel--embedded-trim-trailing-blank-lines session)
         (ghostel--embedded-ensure-trailing-newline session)
         (ghostel--embedded-deactivate-input session)
