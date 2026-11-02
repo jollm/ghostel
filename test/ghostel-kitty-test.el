@@ -376,10 +376,11 @@ reporting it (`viewport_visible' goes false), so wiping scrollback in
 	   (should (equal (get-text-property 1 'display) "SCROLL-IMG"))
 	   (should (get-text-property 1 'ghostel-kitty))
 	   (should (overlay-buffer sb-ov))
-	   ;; Viewport row: stripped.
+	   ;; Viewport row: stripped and its overlay parked for reuse.
 	   (should-not (get-text-property 15 'display))
 	   (should-not (get-text-property 15 'ghostel-kitty))
-	   (should-not (overlay-buffer vp-ov))))))
+	   (should (memq vp-ov ghostel--kitty-overlay-pool))
+	   (should-not (overlay-get vp-ov 'ghostel-kitty))))))
 
 (ert-deftest ghostel-test-kitty-display-image-skips-scrollback-rows ()
   "Re-emit of a partially-visible placement skips already-scrolled rows.
@@ -914,6 +915,24 @@ per frame in libghostty; only the newest should reach Elisp."
                                  #'<)
                            '(1 2)))))
       (kill-buffer buf))))
+
+(ert-deftest ghostel-test-kitty-overlay-pool-reuses-overlays ()
+  "Clearing parks overlays and the next frame takes them back."
+  (ghostel-test--kitty-fixture
+   (lambda ()
+     (insert "\n")
+     (ghostel--kitty-display-image "data" 0 0 1 1 8 16)
+     (let ((first (ghostel--kitty-overlay-at (point-min))))
+       (should first)
+       (ghostel--kitty-clear)
+       ;; Parked: untagged, outside the viewport, queued for reuse.
+       (should (memq first ghostel--kitty-overlay-pool))
+       (should-not (overlay-get first 'ghostel-kitty))
+       (ghostel--kitty-display-image "data" 0 0 1 1 8 16)
+       ;; The same overlay object is back on the row.
+       (should (eq (ghostel--kitty-overlay-at (point-min)) first))
+       (should (overlay-get first 'ghostel-kitty))
+       (should-not (memq first ghostel--kitty-overlay-pool))))))
 
 (provide 'ghostel-kitty-test)
 ;;; ghostel-kitty-test.el ends here

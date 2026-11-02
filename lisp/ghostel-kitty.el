@@ -48,7 +48,6 @@ a local file; set this to nil to accept inline data only."
   :group 'ghostel)
 
 
-
 ;;; Internal state
 
 (defvar-local ghostel--kitty-active nil
@@ -74,6 +73,11 @@ it reports detached markers."
   "Last error raised inside a kitty display callback, or nil.
 Captured here instead of being lost to a fleeting message so it can be
 inspected when image rendering misbehaves.")
+
+(defvar-local ghostel--kitty-overlay-pool nil
+  "Zero-width kitty overlays parked for reuse by the next frame.
+`ghostel--kitty-clear' parks viewport overlays instead of deleting them,
+so a redraw takes them back instead of allocating new ones.")
 
 
 
@@ -150,21 +154,20 @@ the buffer line is long enough to hold the placement's column range."
      ;; wins, but Emacs would render every `before-string' at once (a
      ;; pile of images) if each re-emission added another overlay.
      ((<= end start)
-      (dolist (old (overlays-in (max (point-min) (1- start))
-                                (min (point-max) (1+ start))))
-        (when (and (overlay-get old 'ghostel-kitty)
-                   (= (overlay-start old) start)
-                   (= (overlay-end old) start))
-          (delete-overlay old)))
       ;; The line ends before the image's column: pad with spaces so the
       ;; image starts at that column on every row.  Clamping to the line
       ;; end would draw short rows at the line's end and longer rows at
       ;; the placement's column, making the image ragged.
       (let* ((missing (max 0 (- (+ line-pos vp-col-clamped) line-end-pos)))
-             (ov (make-overlay start start)))
-        (overlay-put ov 'before-string
-                     (concat (make-string missing ?\s)
+             (before (concat (make-string missing ?\s)
                              (propertize " " 'display spec)))
+             (existing (ghostel--kitty-overlay-at start))
+             (ov (or existing
+                     (pop ghostel--kitty-overlay-pool)
+                     (make-overlay start start))))
+        (unless (eq (overlay-start ov) start)
+          (move-overlay ov start start))
+        (overlay-put ov 'before-string before)
         (overlay-put ov 'ghostel-kitty t)))
      ;; Line has enough text — use text property.
      (t
@@ -301,6 +304,26 @@ their combining diacritics make buffer width differ from cell width."
        (setq ghostel--kitty-last-error err)
        (message "ghostel: kitty virtual image error: %S" err)))))
 
+(defun ghostel--kitty-park-overlay (ov)
+  "Park OV for reuse: untag it, drop its before-string, move to `point-min'."
+  (overlay-put ov 'before-string nil)
+  (overlay-put ov 'ghostel-kitty nil)
+  (move-overlay ov (point-min) (point-min))
+  (push ov ghostel--kitty-overlay-pool))
+
+(defun ghostel--kitty-overlay-at (pos)
+  "Return a zero-width kitty overlay at POS, or nil.
+`overlays-at' ignores empty overlays at POS, so look at the
+neighbouring range and match the anchors exactly."
+  (let ((found nil))
+    (dolist (ov (overlays-in (max (point-min) (1- pos))
+                             (min (point-max) (1+ pos))))
+      (when (and (overlay-get ov 'ghostel-kitty)
+                 (= (overlay-start ov) pos)
+                 (= (overlay-end ov) pos))
+        (setq found ov)))
+    found))
+
 (defun ghostel--kitty-clear ()
   "Remove kitty image overlays and per-line clamps from the viewport.
 Both display paths tag the regions/overlays with the `ghostel-kitty'
@@ -324,7 +347,7 @@ leave nothing to re-emit and the image would vanish from history."
       (dolist (ov (overlays-in pos end))
         (when (and (overlay-get ov 'ghostel-kitty)
                    (>= (overlay-start ov) pos))
-          (delete-overlay ov)))
+          (ghostel--kitty-park-overlay ov)))
       (while (< pos end)
         (let ((next (next-single-property-change pos 'ghostel-kitty nil end)))
           (when (get-text-property pos 'ghostel-kitty)
