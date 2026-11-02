@@ -556,5 +556,24 @@ real command evaluator would bind.  Returns the event pipe process."
   (with-temp-buffer
     (should-not (ghostel--eshell-selection-change (selected-window)))))
 
+(ert-deftest ghostel-test-eshell-flush-clears-kitty ()
+  "Flushing output removes kitty image overlays before deleting the rows."
+  (with-temp-buffer
+    (setq major-mode 'eshell-mode)
+    (insert "output\n")
+    (let ((ghostel--kitty-active t)
+          deleted
+          (overlay (make-overlay 1 1)))
+      (overlay-put overlay 'ghostel-kitty t)
+      (cl-letf (((symbol-function 'eshell-beginning-of-output) (lambda () 1))
+                ((symbol-function 'eshell-end-of-output) (lambda () 8))
+                ((symbol-function 'ghostel--embedded-live-p) (lambda (_) nil)))
+        (ghostel--eshell-delete-output
+         (lambda (&rest _) (setq deleted t)) nil))
+      (should deleted)
+      (should-not (overlays-in (point-min) (point-max)))
+      (should-not ghostel--kitty-active))))
+
+
 (provide 'ghostel-eshell-test)
 ;;; ghostel-eshell-test.el ends here

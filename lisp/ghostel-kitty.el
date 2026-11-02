@@ -88,6 +88,30 @@ inspected when image rendering misbehaves.")
     (when (memq 'shared-mem mediums) (setq bits (logior bits 4)))
     bits))
 
+(defun ghostel--kitty-remove-in-range (start end)
+  "Remove kitty image overlays and slices between START and END.
+START and END may be markers.  Only kitty-tagged `display' and
+`line-height' properties are removed, so other consumers of `display'
+in the range are left alone.  Clears `ghostel--kitty-active' when no
+kitty placement remains anywhere."
+  (let ((start (if (markerp start) (marker-position start) start))
+        (end (if (markerp end) (marker-position end) end))
+        (inhibit-read-only t))
+    (when (and start end (< start end))
+      (dolist (ov (overlays-in start end))
+        (when (overlay-get ov 'ghostel-kitty)
+          (delete-overlay ov)))
+      (let ((pos start))
+        (while (< pos end)
+          (let ((next (next-single-property-change pos 'ghostel-kitty nil end)))
+            (when (get-text-property pos 'ghostel-kitty)
+              (remove-text-properties
+               pos next '(display nil line-height nil ghostel-kitty nil)))
+            (setq pos next)))))
+    (when (and ghostel--kitty-active
+               (not (ghostel--kitty-any-remaining-p (point-min) (point-max))))
+      (setq ghostel--kitty-active nil))))
+
 (defun ghostel--kitty-apply-row-slice (row cw ch img
                                            vp-col-clamped visible-cols
                                            slice-x slice-w)
