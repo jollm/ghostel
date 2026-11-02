@@ -8,6 +8,7 @@
 ;;; Code:
 
 (require 'ghostel-test-helpers)
+(require 'ghostel-embedded)
 
 (defvar mwheel-coalesce-scroll-events)
 (defvar last-event-device)
@@ -2092,6 +2093,99 @@ Covers both multibyte and unibyte carriers of the raw bytes."
        (string-to-multibyte (concat "x" (unibyte-string #xe2 #x80 #x94) "y"))))
     (should (equal "x—y" captured))
     (should-not (ghostel-test--has-raw-bytes captured))))
+
+(ert-deftest ghostel-test-mouse-motion-mode ()
+  "Only DEC 1003 counts as any-event motion."
+  :tags '(native)
+  (let ((term (ghostel--new 25 80 1000)))
+    (should-not (ghostel--mouse-motion-p term))
+    (should-not (ghostel--mouse-tracking-p term))
+    (ghostel--write-vt term "\e[?1000h")
+    (should (ghostel--mouse-tracking-p term))
+    (should-not (ghostel--mouse-motion-p term))
+    (ghostel--write-vt term "\e[?1003h")
+    (should (ghostel--mouse-motion-p term))
+    (ghostel--write-vt term "\e[?1003l")
+    (should-not (ghostel--mouse-motion-p term))))
+
+(ert-deftest ghostel-test-mouse-hover-motion ()
+  "Hover motion is forwarded once per new cell when 1003 is active."
+  (with-temp-buffer
+    (let ((ghostel--term 'term)
+          (ghostel--input-mode 'semi-char)
+          (ghostel--mouse-drag-button nil)
+          (ghostel--mouse-hover-last-cell nil)
+          (sent nil)
+          (event (list 'mouse-movement
+                       (list (selected-window) (point) '(0 . 0) 0))))
+      (cl-letf (((symbol-function 'ghostel--mouse-motion-p) (lambda (_) t))
+                ((symbol-function 'ghostel--posn-cell) (lambda (_) '(5 . 2)))
+                ((symbol-function 'ghostel--mouse-mods) (lambda (_) 0))
+                ((symbol-function 'ghostel--mouse-event)
+                 (lambda (_term action button row col mods)
+                   (push (list action button row col mods) sent))))
+        (ghostel--mouse-hover-motion event)
+        (ghostel--mouse-hover-motion event)
+        (should (equal sent '((2 0 2 5 0))))))))
+
+(ert-deftest ghostel-test-mouse-hover-motion-requires-1003 ()
+  "Hover motion is not forwarded without any-event tracking."
+  (with-temp-buffer
+    (let ((ghostel--term 'term)
+          (ghostel--input-mode 'semi-char)
+          (ghostel--mouse-drag-button nil)
+          (ghostel--mouse-hover-last-cell nil)
+          (sent nil)
+          (event (list 'mouse-movement
+                       (list (selected-window) (point) '(0 . 0) 0))))
+      (cl-letf (((symbol-function 'ghostel--mouse-motion-p) (lambda (_) nil))
+                ((symbol-function 'ghostel--posn-cell) (lambda (_) '(5 . 2)))
+                ((symbol-function 'ghostel--mouse-mods) (lambda (_) 0))
+                ((symbol-function 'ghostel--mouse-event)
+                 (lambda (&rest args) (push args sent))))
+        (ghostel--mouse-hover-motion event)
+        (should-not sent)))))
+
+(ert-deftest ghostel-test-embedded-mouse-hover-motion ()
+  "Embedded hover motion is forwarded once per new cell."
+  (with-temp-buffer
+    (let* ((session (ghostel-embedded--make :buffer (current-buffer)
+                                            :term 'term))
+           (ghostel--embedded-session session)
+           (ghostel--embedded-mouse-hover-last-cell nil)
+           (sent nil)
+           (event (list 'mouse-movement
+                        (list (selected-window) (point) '(0 . 0) 0))))
+      (cl-letf (((symbol-function 'ghostel--mouse-motion-p) (lambda (_) t))
+                ((symbol-function 'ghostel--embedded-mouse-cell)
+                 (lambda (_) '(3 . 1)))
+                ((symbol-function 'ghostel--mouse-mods) (lambda (_) 0))
+                ((symbol-function 'ghostel--embedded-send-mouse)
+                 (lambda (_session action button row col mods)
+                   (push (list action button row col mods) sent))))
+        (ghostel-embedded-mouse-motion event)
+        (ghostel-embedded-mouse-motion event)
+        (should (equal sent '((2 0 1 3 0))))))))
+
+(ert-deftest ghostel-test-hover-motion-sync ()
+  "The variable `track-mouse' follows the terminal's any-event motion mode."
+  (with-temp-buffer
+    (let ((orig (window-buffer (selected-window)))
+          (ghostel--term 'term)
+          (ghostel--input-mode 'semi-char)
+          (track-mouse nil)
+          (wanted t))
+      (unwind-protect
+          (progn
+            (set-window-buffer (selected-window) (current-buffer))
+            (cl-letf (((symbol-function 'ghostel--mouse-motion-p)
+                       (lambda (_) wanted)))
+              (ghostel--sync-hover-motion)
+              (should track-mouse)
+              (setq wanted nil)
+              (ghostel--sync-hover-motion)
+              (should-not track-mouse)))
+        (set-window-buffer (selected-window) orig)))))
 
 (provide 'ghostel-mouse-paste-test)
 ;;; ghostel-mouse-paste-test.el ends here
