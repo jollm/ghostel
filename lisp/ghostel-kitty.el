@@ -54,6 +54,22 @@ a local file; set this to nil to accept inline data only."
 (defvar-local ghostel--kitty-active nil
   "Non-nil when kitty image overlays are present in the buffer.")
 
+(defvar-local ghostel--kitty-screen-bounds-function nil
+  "Function returning the terminal screen's (START . END) in this buffer.
+Nil means the terminal owns the whole buffer.  An embedded terminal sets
+this to its region's markers, so placement rows and cleanup stay inside
+the region instead of addressing the host buffer's prompts and history.")
+
+(defun ghostel--kitty-screen-bounds ()
+  "Return (START . END) of the terminal screen in the current buffer.
+Falls back to the whole buffer when no bounds function is installed or
+it reports detached markers."
+  (let ((bounds (and ghostel--kitty-screen-bounds-function
+                     (funcall ghostel--kitty-screen-bounds-function))))
+    (if (and bounds (car bounds) (cdr bounds))
+        bounds
+      (cons (point-min) (point-max)))))
+
 (defvar-local ghostel--kitty-last-error nil
   "Last error raised inside a kitty display callback, or nil.
 Captured here instead of being lost to a fleeting message so it can be
@@ -169,24 +185,29 @@ user shouldn't have to trigger one)."
                (slice-w (* visible-cols cw)))
           (when (> visible-cols 0)
             (save-excursion
-              (goto-char (point-min))
-              (when (zerop (forward-line skip))
-                ;; Skip rows already in materialized scrollback — they
-                ;; got their overlays in an earlier emit and
-                ;; `kitty-clear' preserves scrollback overlays.
-                ;; Re-applying here would stack a second overlay on
-                ;; every scrolled-in row.
-                (let ((row start-row)
-                      (more t)
-                      (vp-start (or (ghostel--viewport-start) (point-min))))
-                  (while (and more (< row g-rows))
-                    (when (>= (point) vp-start)
-                      (ghostel--kitty-apply-row-slice
-                       row cw ch img
-                       vp-col-clamped visible-cols slice-x slice-w))
-                    (setq row (1+ row))
-                    (unless (zerop (forward-line 1))
-                      (setq more nil))))))))
+              (let* ((bounds (ghostel--kitty-screen-bounds))
+                     (screen-start (car bounds))
+                     (screen-end (cdr bounds)))
+                (goto-char screen-start)
+                (when (zerop (forward-line skip))
+                  ;; Skip rows already in materialized scrollback — they
+                  ;; got their overlays in an earlier emit and
+                  ;; `kitty-clear' preserves scrollback overlays.
+                  ;; Re-applying here would stack a second overlay on
+                  ;; every scrolled-in row.
+                  (let ((row start-row)
+                        (more t)
+                        (vp-start (max screen-start
+                                       (or (ghostel--viewport-start)
+                                           screen-start))))
+                    (while (and more (< row g-rows) (< (point) screen-end))
+                      (when (>= (point) vp-start)
+                        (ghostel--kitty-apply-row-slice
+                         row cw ch img
+                         vp-col-clamped visible-cols slice-x slice-w))
+                      (setq row (1+ row))
+                      (unless (zerop (forward-line 1))
+                        (setq more nil)))))))))
       (error
        (setq ghostel--kitty-last-error err)
        (message "ghostel: kitty image error: %S" err)))))
@@ -211,7 +232,7 @@ their combining diacritics make buffer width differ from cell width."
                                   :ascent 'center)))
           (save-excursion
             ;; The last screen row is the line before the final newline.
-            (goto-char (point-max))
+            (goto-char (cdr (ghostel--kitty-screen-bounds)))
             (let ((ph (string #x10EEEE)))
               (when (and (zerop (forward-line (- (1+ row-up))))
                          (search-forward ph (line-end-position) t (1+ nth)))
@@ -255,8 +276,10 @@ viewport (`viewport_visible' goes false), so wiping scrollback would
 leave nothing to re-emit and the image would vanish from history."
   (when ghostel--kitty-active
     (let* ((inhibit-read-only t)
-           (vp-start (or (ghostel--viewport-start) (point-min)))
-           (end (point-max))
+           (bounds (ghostel--kitty-screen-bounds))
+           (start (car bounds))
+           (end (cdr bounds))
+           (vp-start (max start (or (ghostel--viewport-start) start)))
            (pos vp-start))
       (dolist (ov (overlays-in pos end))
         (when (and (overlay-get ov 'ghostel-kitty)
@@ -274,7 +297,7 @@ leave nothing to re-emit and the image would vanish from history."
       ;; Sticky-flag hygiene: once we've stripped the viewport, anything
       ;; remaining must be in scrollback.  If there's nothing left at all,
       ;; clear the flag so future redraws skip the buffer scan entirely.
-      (unless (ghostel--kitty-any-remaining-p (point-min) vp-start)
+      (unless (ghostel--kitty-any-remaining-p start vp-start)
         (setq ghostel--kitty-active nil)))))
 
 (defun ghostel--kitty-slice-y-at (pos)
@@ -296,13 +319,15 @@ Looks at both the buffer text-property `display' and at any
       (nth 2 (car display)))))
 
 (defun ghostel--kitty-strip-orphan-top ()
-  "Strip kitty image debris left at point-min by scrollback eviction.
+  "Strip kitty image debris left at the screen top by scrollback eviction.
 
-Two distinct artifacts both surface here:
+The screen top is `point-min' for a standalone terminal and the embedded
+region's start for an in-buffer terminal.  Two distinct artifacts both
+surface here:
 
 1. Collapsed overlays.  `delete-region' clamps overlays inside the
    deleted range to its start instead of deleting them, so an evicted
-   row's zero-width kitty overlays all snap onto the new point-min and
+   row's zero-width kitty overlays all snap onto the new screen top and
    stack there (dozens for a tall image).  Detected by counting
    zero-width kitty overlays per start-position — more than one at the
    same position is never legitimate (the placement loop emits at most
@@ -310,29 +335,32 @@ Two distinct artifacts both surface here:
 
 2. Orphan text-property slices.  When eviction straddles an image, the
    surviving rows keep their `display' slices into a now-incomplete
-   image.  Detected by a slice y-offset > 0 at point-min (y=0 would
+   image.  Detected by a slice y-offset > 0 at the screen top (y=0 would
    mean the row IS the image's top, so it's an intact image's first
    row, not an orphan)."
-  (let ((inhibit-read-only t))
+  (let* ((inhibit-read-only t)
+         (bounds (ghostel--kitty-screen-bounds))
+         (top (car bounds))
+         (bottom (cdr bounds)))
     ;; (1) Eviction-collapsed overlay stacks.
     (let ((counts (make-hash-table)))
-      (dolist (ov (overlays-in (point-min) (point-max)))
+      (dolist (ov (overlays-in top bottom))
         (when (and (overlay-get ov 'ghostel-kitty)
                    (= (overlay-start ov) (overlay-end ov)))
           (let ((pos (overlay-start ov)))
             (puthash pos (1+ (gethash pos counts 0)) counts))))
-      (dolist (ov (overlays-in (point-min) (point-max)))
+      (dolist (ov (overlays-in top bottom))
         (when (and (overlay-get ov 'ghostel-kitty)
                    (= (overlay-start ov) (overlay-end ov))
                    (> (gethash (overlay-start ov) counts 0) 1))
           (delete-overlay ov))))
-    ;; (2) Orphan text-property slices at point-min.
-    (let ((slice-y (ghostel--kitty-slice-y-at (point-min))))
+    ;; (2) Orphan text-property slices at the screen top.
+    (let ((slice-y (ghostel--kitty-slice-y-at top)))
       (when (and slice-y (> slice-y 0))
-        (let ((start (point-min))
+        (let ((start top)
               (end (save-excursion
-                     (goto-char (point-min))
-                     (while (and (< (point) (point-max))
+                     (goto-char top)
+                     (while (and (< (point) bottom)
                                  (or (get-text-property (point) 'ghostel-kitty)
                                      (cl-some
                                       (lambda (ov) (overlay-get ov 'ghostel-kitty))
