@@ -120,6 +120,8 @@ command, so once the buffer has filled the prompt jumps to the bottom row on
 each RET.  Set it to `nil` (buffer-locally with `setq-local`, or globally) for
 a stable prompt.
 
+Kitty graphics images are shown on graphical frames.
+
 ```emacs-lisp
 (use-package ghostel-eshell
   :hook (eshell-load . ghostel-eshell-mode))
