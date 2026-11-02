@@ -260,26 +260,26 @@ smaller than what the standalone Ghostty terminal would report, they
 either fall back to half-block rendering (timg) or fill more cells
 than expected with upscaled, blocky output (yazi).
 
-`auto' computes the display DPI from `display-mm-width' and
-`display-pixel-width' and uses DPI/96 directly as a float.  Standard
-~96 DPI displays resolve to ~1.0; HiDPI displays (~150 DPI) resolve
-to ~1.5; ~192 DPI displays to ~2.0.  If the display's physical size
-isn't reported (some multi-monitor setups, virtual displays), falls
-back to 1.
+`auto' uses the frame's own scale factor (`frame-scale-factor'): the
+number of device pixels Emacs lays out per logical pixel.  That is the
+density at which an image drawn at the cell's font dimensions is
+rendered, so it matches the pixel grid the terminal is displayed in
+without guessing.  Emacs versions without `frame-scale-factor' (before
+29) fall back to DPI/96 from `display-mm-width' and
+`display-pixel-width', then to 1 when the display reports no physical
+size.
 
-This is a heuristic — Emacs has no portable API for the OS-level
-backing scale factor, so exact parity with standalone Ghostty
-\(which measures cell size in real physical pixels via the window
-server) requires setting an explicit number here.  Useful overrides:
-the exact `physical_cell_w / default-font-width' ratio (e.g. 2.28) for
-pixel-perfect parity with standalone Ghostty's image rendering, or
-1 to opt out of HiDPI-aware reporting altogether.
+Reporting the frame's grid rather than the display's DPI matters on
+fractional-scale compositors: `display-pixel-width' can describe the
+compositor's backing store, far wider than the frame, and programs
+would then send images Emacs downscales and discards.  Set an explicit
+number to supersample for a specific renderer instead.
 
 Note that `image-scaling-factor' is *not* a useful signal here:
 Emacs's `auto' resolves it from `frame-char-width' (a font-width
-heuristic for image-vs-text scaling), not from the display's DPI
-or backing scale factor."
-  :type '(choice (const :tag "Auto-detect from display DPI" auto)
+heuristic for image-vs-text scaling), not from the frame's scale
+factor or the display's DPI."
+  :type '(choice (const :tag "Auto-detect from frame scale" auto)
                  (number :tag "Explicit ratio")))
 
 (defcustom ghostel-glyph-scale-floor 0.0
@@ -4942,11 +4942,21 @@ Requires the buffer to be visible in a window; has no effect otherwise."
 (defun ghostel--cell-pixel-scale ()
   "Return the active cell pixel-size scaling factor as a positive number.
 May be a float - callers are expected to round when converting to a
-pixel count."
-  (cond
-   ((numberp ghostel-cell-pixel-scale)
-    (max 1 ghostel-cell-pixel-scale))
-   (t (or (ghostel--detect-cell-pixel-scale) 1))))
+pixel count.
+
+The frame's own scale factor (`frame-scale-factor') is authoritative: it
+is the number of device pixels Emacs lays out per logical pixel, and an
+image drawn at the cell's font dimensions is rendered at that density.
+The DPI/96 heuristic is only a fallback for Emacs versions without it;
+`display-pixel-width' can describe the display rather than the frame's
+pixel grid (fractional-scale compositors report an inflated value)."
+  (if (numberp ghostel-cell-pixel-scale)
+      (max 1 ghostel-cell-pixel-scale)
+    (or (and (fboundp 'frame-scale-factor)
+             (let ((scale (ignore-errors (frame-scale-factor))))
+               (and (numberp scale) (>= scale 1) scale)))
+        (ghostel--detect-cell-pixel-scale)
+        1)))
 
 (defun ghostel--detect-cell-pixel-scale ()
   "Compute cell pixel-size scale from display DPI, or nil if unknown.
