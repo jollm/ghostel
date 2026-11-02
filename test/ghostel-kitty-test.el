@@ -117,6 +117,32 @@ DUMMY non-nil fakes the daemon's initial frame."
                (lambda () nil)))
       (should (= (ghostel--cell-pixel-scale) 1)))))
 
+(ert-deftest ghostel-test-cell-pixel-scale-prefers-frame-scale ()
+  "The frame's scale factor wins over the display DPI heuristic."
+  (let ((ghostel-cell-pixel-scale 'auto))
+    (cl-letf (((symbol-function 'frame-scale-factor) (lambda (&optional _) 2.0))
+              ((symbol-function 'ghostel--detect-cell-pixel-scale)
+               (lambda () 1.25)))
+      (should (= (ghostel--cell-pixel-scale) 2.0)))))
+
+(ert-deftest ghostel-test-cell-pixel-scale-ignores-inflated-display-dpi ()
+  "An unscaled frame ignores a compositor-inflated DPI estimate.
+Fractional-scale compositors can report a `display-pixel-width' far
+wider than the frame; the frame's 1x grid is what images are drawn in."
+  (let ((ghostel-cell-pixel-scale 'auto))
+    (cl-letf (((symbol-function 'frame-scale-factor) (lambda (&optional _) 1.0))
+              ((symbol-function 'ghostel--detect-cell-pixel-scale)
+               (lambda () 2.12)))
+      (should (= (ghostel--cell-pixel-scale) 1.0)))))
+
+(ert-deftest ghostel-test-cell-pixel-scale-falls-back-below-1 ()
+  "A non-positive frame scale falls back to the DPI heuristic."
+  (let ((ghostel-cell-pixel-scale 'auto))
+    (cl-letf (((symbol-function 'frame-scale-factor) (lambda (&optional _) 0.5))
+              ((symbol-function 'ghostel--detect-cell-pixel-scale)
+               (lambda () 1.5)))
+      (should (= (ghostel--cell-pixel-scale) 1.5)))))
+
 (ert-deftest ghostel-test-reported-cell-dims-multiply-font-by-scale ()
   "Reported cell width/height = the buffer's font dim * scale, rounded.
 The frame's char dimensions are not used: a `default' face remap
