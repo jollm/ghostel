@@ -826,9 +826,13 @@ all-blank region is emptied."
           (let* ((line-end (save-excursion
                              (goto-char pos)
                              (line-end-position)))
-                 (blank (string-match-p
-                         "\\`[ \t]*\\'"
-                         (buffer-substring-no-properties pos line-end))))
+                 (blank (and (string-match-p
+                              "\\`[ \t]*\\'"
+                              (buffer-substring-no-properties pos line-end))
+                             ;; A row carrying a kitty image slice is
+                             ;; content even when its cells are spaces.
+                             (not (ghostel--kitty-any-remaining-p
+                                   pos (min end (1+ line-end)))))))
             (unless blank
               ;; Keep the newline that terminates the last content row.
               (setq last-used (min (1+ line-end) end)))
