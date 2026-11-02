@@ -17,6 +17,30 @@
     (should (equal '(0 . 0) (ghostel-test--cursor term))) ; cursor at origin
     ))
 
+(ert-deftest ghostel-test-debug-dump-file ()
+  "A configured dump records VT output and the size timeline."
+  :tags '(native)
+  (let* ((base (make-temp-file "ghostel-dump-" nil ""))
+         (raw (concat base ".raw"))
+         (log (concat base ".log"))
+         (ghostel-debug-dump-file base)
+         (term (ghostel--new 5 20 100)))
+    (unwind-protect
+        (progn
+          (ghostel--write-vt term "hello\e[31mworld")
+          (should (file-exists-p raw))
+          (should (file-exists-p log))
+          (with-temp-buffer
+            (insert-file-contents raw)
+            (should (equal (buffer-string) "hello\e[31mworld")))
+          (with-temp-buffer
+            (insert-file-contents log)
+            (should (string-match-p "event=create" (buffer-string)))
+            (should (string-match-p "rows=5 cols=20" (buffer-string)))))
+      (dolist (file (list raw log base))
+        (when (file-exists-p file)
+          (delete-file file))))))
+
 (ert-deftest ghostel-test-write-input ()
   "Test feeding text to the terminal."
   :tags '(native)

@@ -52,6 +52,7 @@ const LockedStream = struct {
     pub fn nextSlice(self: *LockedStream, data: []const u8) !void {
         try self.process.owner.lock();
         defer self.process.owner.unlock();
+        self.process.owner.dumpSlice(data);
         self.process.stream.nextSlice(data);
         self.process.stream.handler.flushControlMode();
     }
