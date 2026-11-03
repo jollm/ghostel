@@ -33,10 +33,19 @@
           (with-temp-buffer
             (insert-file-contents raw)
             (should (equal (buffer-string) "hello\e[31mworld")))
+          (ghostel--write-vt term "\e[?1049h")
+          (ghostel--dump-event term "region-start rows=1 cols=2 window=3")
+          (ghostel--write-vt term "\e[?1049l")
           (with-temp-buffer
             (insert-file-contents log)
             (should (string-match-p "event=create" (buffer-string)))
-            (should (string-match-p "rows=5 cols=20" (buffer-string)))))
+            (should (string-match-p "rows=5 cols=20" (buffer-string)))
+            (should (string-match-p "event=alt-on" (buffer-string)))
+            (should (string-match-p "event=alt-off" (buffer-string)))
+            (should (string-match-p
+                     "event=region-start rows=1 cols=2 window=3"
+                     (buffer-string)))
+            (should (string-match-p "time=" (buffer-string)))))
       (dolist (file (list raw log base))
         (when (file-exists-p file)
           (delete-file file))))))

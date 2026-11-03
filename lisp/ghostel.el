@@ -345,13 +345,14 @@ and mode-switch anchors) by returning nil when it is set."
 (defcustom ghostel-debug-dump-file nil
   "When non-nil, capture native terminal traffic for diagnostics.
 The value is a file name base: the terminal's byte stream is written to
-BASE.raw and a size timeline to BASE.log.  Timeline lines record spawn
-and resize events with the byte offset at which each occurred, so a
-capture can be replayed with the same sizes.  Both files are truncated
-when a terminal is created.  Captured output may contain anything the
-program displayed, including secrets; treat the files as sensitive.
-This is a debugging aid for platform-specific rendering (for example
-ConPTY on MS-Windows); leave it nil in normal use."
+BASE.raw and an event timeline to BASE.log.  Timeline lines record
+create, spawn, resize and alternate-screen events, plus embedded region
+and process-exit notes, with the byte offset and milliseconds since the
+capture opened, so a capture can be replayed with the same sizes.  Both
+files are truncated when a terminal is created.  Captured output may
+contain anything the program displayed, including secrets; treat the
+files as sensitive.  This is a debugging aid for platform-specific
+rendering (for example ConPTY on MS-Windows); leave it nil in normal use."
   :type '(choice (const :tag "Off" nil) file)
   :group 'ghostel)
 
@@ -827,6 +828,7 @@ to nil to disable the regex fallback entirely (OSC 133 only)."
 (declare-function ghostel--set-palette "ghostel-module")
 (declare-function ghostel--set-size "ghostel-module" (term rows cols &optional cell-w cell-h))
 (declare-function ghostel--write-vt "ghostel-module")
+(declare-function ghostel--dump-event "ghostel-module" (term text))
 (declare-function ghostel--write-pty "ghostel-module")
 (declare-function ghostel--pty-password-input-p "ghostel-module" (term))
 (declare-function ghostel--pty-foreground-pgid "ghostel-module" (term))
@@ -3925,6 +3927,11 @@ invalidate only their region."
         (funcall (or (process-get pipe 'ghostel--invalidate-function)
                      #'ghostel--invalidate))))))
 
+(defun ghostel--dump-note (term text)
+  "Append TEXT to TERM's debug capture, ignoring failures."
+  (when term
+    (ignore-errors (ghostel--dump-event term text))))
+
 (defun ghostel--sentinel (process event)
   "Clean up after the terminal process or event pipe changes state.
 PROCESS is the Emacs process object that triggered the sentinel.
@@ -3933,6 +3940,11 @@ EVENT is the state-change description passed by Emacs."
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (ghostel--cancel-password-confirm-timer)
+        (ghostel--dump-note
+         ghostel--term
+         (format "exit status=%s"
+                 (or (process-get process 'ghostel--exit-status)
+                     (process-exit-status process))))
         ;; Deferred, so that effects from the last output are applied first.
         (ghostel--defer #'ghostel-status--drop-running)
         (remove-hook 'pre-redisplay-functions #'ghostel--fake-cursor-update t)

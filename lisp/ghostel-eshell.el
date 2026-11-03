@@ -469,6 +469,16 @@ the space below the prompt, restoring the previous layout."
     (let ((alt (ghostel--alt-screen-p (ghostel-embedded-term session))))
       (unless (eq alt (ghostel-embedded-alt-screen-p session))
         (setf (ghostel-embedded-alt-screen-p session) alt)
+        (ghostel--embedded-dump-note
+         session
+         (format "screen alt=%s window=%s"
+                 alt
+                 (let ((window (get-buffer-window
+                                (ghostel-embedded-buffer session) t)))
+                   (if (window-live-p window)
+                       (with-selected-window window
+                         (floor (window-screen-lines)))
+                     0))))
         (let ((size (ghostel--eshell-terminal-size nil nil alt)))
           (ghostel--embedded-resize session (car size) (cdr size) t))))))
 
@@ -544,6 +554,11 @@ For a native PTY the child's exit status replaces the pipe's own."
     (when (buffer-live-p (process-buffer process))
       (with-current-buffer (process-buffer process)
         (when session
+          (ghostel--embedded-dump-note
+           session
+           (format "exit status=%s"
+                   (or (process-get process 'ghostel--exit-status)
+                       (process-exit-status process))))
           (ghostel--embedded-finish session)
           (setq pos (ghostel--eshell-region-end session))
           (when pos

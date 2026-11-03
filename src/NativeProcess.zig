@@ -53,6 +53,7 @@ const LockedStream = struct {
         defer self.process.owner.unlock();
         self.process.owner.dumpSlice(data);
         self.process.stream.nextSlice(data);
+        self.process.owner.logAltIfChanged();
     }
 };
 
