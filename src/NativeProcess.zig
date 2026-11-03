@@ -55,6 +55,7 @@ const LockedStream = struct {
         self.process.owner.dumpSlice(data);
         self.process.stream.nextSlice(data);
         self.process.stream.handler.flushControlMode();
+        self.process.owner.logAltIfChanged();
     }
 };
 

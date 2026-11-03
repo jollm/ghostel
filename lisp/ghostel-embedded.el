@@ -328,6 +328,11 @@ terminal drives it."
                  (ghostel--mouse-motion-p (ghostel-embedded-term session)))
                t))))
 
+(defun ghostel--embedded-dump-note (session text)
+  "Append TEXT to SESSION's debug capture, ignoring failures."
+  (when (ghostel--embedded-live-p session)
+    (ghostel--dump-note (ghostel-embedded-term session) text)))
+
 (defun ghostel--embedded-start (buffer &optional position rows cols)
   "Start an embedded terminal in BUFFER.
 POSITION is where the region starts; it defaults to `point-max' and must
@@ -374,6 +379,15 @@ already has a live embedded session or is dead."
         (ghostel--embedded-apply-host-settings session)
         (setq-local ghostel--resize-request-function
                     'ghostel--embedded-resize-request)
+        (ghostel--embedded-dump-note
+         session
+         (format "region-start rows=%d cols=%d window=%s"
+                 rows cols
+                 (let ((window (get-buffer-window buffer t)))
+                   (if (window-live-p window)
+                       (with-selected-window window
+                         (floor (window-screen-lines)))
+                     0))))
         ;; Kitty placements and cleanup stay inside the region rather
         ;; than addressing the host buffer around it.
         (setq ghostel--kitty-screen-bounds-function
@@ -611,6 +625,9 @@ when NATIVE is non-nil.  When input is already active, also point the
 encoder at PROCESS."
   (setf (ghostel-embedded-process session) process
         (ghostel-embedded-native-p session) (and native t))
+  (ghostel--embedded-dump-note
+   session
+   (format "attach native=%s" (if native "t" "nil")))
   (when (ghostel-embedded-input-active session)
     (with-current-buffer (ghostel-embedded-buffer session)
       (setq ghostel--process process)))
@@ -906,6 +923,7 @@ Returns SESSION."
   (when (ghostel-embedded-p session)
     (when (ghostel--embedded-live-p session)
       (with-current-buffer (ghostel-embedded-buffer session)
+        (ghostel--embedded-dump-note session "region-finish")
         (ghostel--embedded-cancel-timer session)
         ;; The final frame and the alt-screen reset are best-effort: even if
         ;; the native renderer signals (e.g. on a glyph it cannot shape), the

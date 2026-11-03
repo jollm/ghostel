@@ -46,6 +46,10 @@ pty_size: WinSize = .{ .cols = 0, .rows = 0 },
 dump_raw: ?std.Io.File = null,
 dump_log: ?std.Io.File = null,
 dump_bytes: u64 = 0,
+/// Timestamp (ns, monotonic) the capture opened; event times are relative.
+dump_start_ns: i128 = 0,
+/// Last alternate-screen state written to the timeline.
+dump_alt: bool = false,
 /// Light/dark as classified by Emacs for `ghostel-default`; reported via CSI 996/997.
 color_scheme: gt.device_status.ColorScheme = .dark,
 /// Name and version answered to XTVERSION; null answers libghostty's default.
@@ -113,6 +117,8 @@ fn startDump(self: *Self, env: emacs.Env) void {
     self.dump_raw = self.openDumpFile(raw_path) catch null;
     self.dump_log = self.openDumpFile(log_path) catch null;
     if (self.dump_raw == null and self.dump_log == null) return;
+    self.dump_start_ns = @intCast(std.Io.Clock.now(.awake, self.io).nanoseconds);
+    self.dump_alt = self.terminal.screens.active_key == .alternate;
     self.logDumpEvent("create", self.terminal.rows, self.terminal.cols);
 }
 
@@ -122,18 +128,53 @@ fn openDumpFile(self: *Self, path: []const u8) !std.Io.File {
     return std.Io.Dir.cwd().createFile(self.io, path, .{ .truncate = true });
 }
 
-/// Append SIZE to the dump timeline.  Callers hold the terminal lock.
-fn logDumpEvent(self: *Self, comptime event: []const u8, rows: u16, cols: u16) void {
+/// Append a size event to the dump timeline.  Callers hold the lock.
+fn logDumpEvent(self: *Self, event: []const u8, rows: u16, cols: u16) void {
     const file = self.dump_log orelse return;
-    var buf: [160]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "offset={d} event={s} rows={d} cols={d}\n", .{
-        self.dump_bytes, event, rows, cols,
+    var buf: [192]u8 = undefined;
+    const line = std.fmt.bufPrint(
+        &buf,
+        "offset={d} event={s} rows={d} cols={d} time={d}\n",
+        .{ self.dump_bytes, event, rows, cols, self.nowMs() },
+    ) catch return;
+    file.writeStreamingAll(self.io, line) catch |err| {
+        std.log.warn("ghostel: dump log write failed: {s}", .{@errorName(err)});
+        file.close(self.io);
+        self.dump_log = null;
+    };
+}
+
+/// Milliseconds since the capture was opened.
+fn nowMs(self: *Self) i128 {
+    const ns: i128 = @intCast(std.Io.Clock.now(.awake, self.io).nanoseconds);
+    return @divTrunc(ns - self.dump_start_ns, 1_000_000);
+}
+
+/// Append a free-form event to the dump timeline.  Callers hold the lock.
+/// Control characters in TEXT are replaced so one event stays on one line.
+pub fn logNote(self: *Self, text: []const u8) void {
+    const file = self.dump_log orelse return;
+    var clean: [192]u8 = undefined;
+    const n = @min(text.len, clean.len);
+    for (text[0..n], 0..) |c, i| clean[i] = if (c == '\n' or c == '\r') ' ' else c;
+    var buf: [240]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "offset={d} event={s} time={d}\n", .{
+        self.dump_bytes, clean[0..n], self.nowMs(),
     }) catch return;
     file.writeStreamingAll(self.io, line) catch |err| {
         std.log.warn("ghostel: dump log write failed: {s}", .{@errorName(err)});
         file.close(self.io);
         self.dump_log = null;
     };
+}
+
+/// Log an alternate-screen transition when it happens.  Callers hold the lock.
+pub fn logAltIfChanged(self: *Self) void {
+    const alt = self.terminal.screens.active_key == .alternate;
+    if (self.dump_alt == alt) return;
+    self.dump_alt = alt;
+    const size = self.winSize();
+    self.logDumpEvent(if (alt) "alt-on" else "alt-off", size.rows, size.cols);
 }
 
 pub fn destroy(self: *Self) void {
@@ -200,6 +241,7 @@ pub fn vtWrite(self: *Self, data: []const u8) !void {
     self.dumpSlice(data);
     self.stream.nextSlice(data);
     self.stream.handler.flushControlMode();
+    self.logAltIfChanged();
 }
 
 /// Append DATA to the diagnostic dump.  The caller must hold the lock.
@@ -656,6 +698,29 @@ pub const emacs_functions = [_]emacs.FunctionEntry{
                 const term = env.getUserPtr(Self, args[0]) orelse return error.InvalidTerminalHandle;
                 const raw = try env.extractStringAlloc(module_alloc, args[1], &term.string_buffer);
                 try term.restoreSnapshot(env, raw);
+                return env.t();
+            }
+        },
+    },
+    .{
+        .name = "ghostel--dump-event",
+        .arity = .{ 2, 2 },
+        .doc =
+        \\Append an event line to TERM's debug capture.
+        \\
+        \\TEXT is the event name followed by optional `key=value' fields,
+        \\for example "region-start rows=61 cols=127 window=61".  Does
+        \\nothing unless `ghostel-debug-dump-file' opened a capture.
+        \\
+        \\(ghostel--dump-event TERM TEXT)
+        ,
+        .impl = struct {
+            pub fn call(env: emacs.Env, _: isize, args: [*c]emacs.Value) !emacs.Value {
+                const term = env.getUserPtr(Self, args[0]) orelse return error.InvalidTerminalHandle;
+                try term.lock();
+                defer term.unlock();
+                const text = try env.extractStringAlloc(module_alloc, args[1], &term.string_buffer);
+                term.logNote(text);
                 return env.t();
             }
         },
