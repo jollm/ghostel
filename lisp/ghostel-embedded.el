@@ -328,6 +328,8 @@ already has a live embedded session or is dead."
                       :rows rows
                       :cols cols)))
         (setq ghostel--embedded-session session)
+        (setq-local ghostel--resize-request-function
+                    'ghostel--embedded-resize-request)
         (ghostel--embedded-dump-note
          session
          (format "region-start rows=%d cols=%d window=%s"
@@ -483,6 +485,30 @@ even when it did not change."
           ;; A resize only takes effect on the next redraw and may
           ;; invalidate every row, so render it synchronously.
           (ghostel--embedded-redraw-now session t))))))
+
+(defun ghostel--embedded-resize-request (rows cols)
+  "Honour a text-area resize request for the current embedded terminal.
+ROWS or COLS zero keeps the current value for that dimension.  The
+request is clamped to the host window, so a program asking for the
+whole window gets it without exceeding the window; a full-screen
+program that does not use the alternate screen can then fill it."
+  (let ((session (bound-and-true-p ghostel--embedded-session)))
+    (when (ghostel--embedded-live-p session)
+      (let* ((window (get-buffer-window (ghostel-embedded-buffer session) t))
+             (rows (if (> rows 0) rows (ghostel-embedded-rows session)))
+             (cols (if (> cols 0) cols (ghostel-embedded-cols session)))
+             (max-rows (if (window-live-p window)
+                           (with-selected-window window
+                             (floor (window-screen-lines)))
+                         rows))
+             (max-cols (if (window-live-p window)
+                           (window-max-chars-per-line window)
+                         cols))
+             (rows (max 1 (min rows max-rows)))
+             (cols (max 1 (min cols max-cols))))
+        (unless (and (= rows (ghostel-embedded-rows session))
+                     (= cols (ghostel-embedded-cols session)))
+          (ghostel--embedded-resize session rows cols))))))
 
 (defmacro ghostel--embedded-with-process (session &rest body)
   "Run BODY in SESSION's host buffer with its PTY bound for the encoder.
@@ -855,6 +881,7 @@ Returns SESSION."
         ;; the frozen output; trimming preserves image rows.  The bounds
         ;; hook must not outlive the session.
         (setq ghostel--kitty-screen-bounds-function nil)
+        (setq-local ghostel--resize-request-function nil)
         (ghostel--embedded-trim-trailing-blank-lines session)
         (ghostel--embedded-ensure-trailing-newline session)
         (ghostel--embedded-deactivate-input session)
