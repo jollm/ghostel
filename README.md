@@ -108,7 +108,7 @@ Kitty graphics images are shown on graphical frames.
 Visual commands (`eshell-visual-commands`) get the whole window and fill it
 from the start, as do programs that enter the alternate screen or ask the
 terminal to resize its text area; other commands use the space below the
-prompt.
+prompt.  A full-window terminal keeps its view fixed while its cursor moves.
 
 One Eshell setting affects the prompt: `eshell-scroll-show-maximum-output`
 (default `t`) recenters the last line to the window bottom after every
