@@ -43,6 +43,12 @@ All notable changes to this project will be documented in this file.
   Code then draws images in graphical frames without
   `CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1`.
 - `TERM_PROGRAM_VERSION` is now `1.4.0`.
+- In-buffer Eshell terminals support kitty graphics on graphical frames:
+  placements are anchored to the terminal region, so images from `chafa`,
+  `ranger` and similar programs render in place and remain in the frozen
+  output after the command exits; flushing the output (`C-c C-o`) discards
+  them with the rows.  A TTY frame keeps the protocol disabled so programs
+  fall back to text.
 
 ### Fixed
 - A paste reaches `ghostel-pty-out-function` in one call.  Its brackets
